@@ -1,6 +1,10 @@
 use std::time::Duration;
 
 mod update_context;
+use crate::{
+    electrical::Electricity,
+    shared::{to_bool, ConsumePower, ElectricalBuses, PowerConsumptionReport},
+};
 use uom::si::{
     acceleration::foot_per_second_squared,
     electric_current::ampere,
@@ -17,13 +21,7 @@ use uom::si::{
     volume_rate::gallon_per_second,
 };
 pub use update_context::*;
-
 pub mod test;
-
-use crate::{
-    electrical::consumption::{ElectricPower, SuppliedPower},
-    shared::{to_bool, ConsumePower, ElectricalBuses, PowerConsumptionReport},
-};
 
 /// Trait for a type which can read and write simulator data.
 /// Using this trait implementors can abstract away the way the code
@@ -41,15 +39,34 @@ pub trait SimulatorReaderWriter {
 /// [`Aircraft`]: trait.Aircraft.html
 /// [`Simulation`]: struct.Simulation.html
 pub trait Aircraft: SimulationElement {
-    fn update_before_power_distribution(&mut self, _context: &UpdateContext) {}
+    fn update_before_power_distribution(
+        &mut self,
+        _context: &UpdateContext,
+        _electricity: &mut Electricity,
+    ) {
+    }
     fn update_after_power_distribution(&mut self, _context: &UpdateContext) {}
-    fn get_supplied_power(&mut self) -> SuppliedPower {
-        SuppliedPower::new()
+
+    fn distribute_electricity(&mut self, context: &UpdateContext, electricity: &Electricity)
+    where
+        Self: Sized,
+    {
+        electricity.distribute_to(self, context);
     }
 
-    fn distribute_electricity(&mut self, _context: &UpdateContext) {}
-    fn consume_electricity(&mut self) {}
-    fn report_electricity_consumption(&mut self) {}
+    fn consume_electricity(&mut self, electricity: &mut Electricity)
+    where
+        Self: Sized,
+    {
+        electricity.consume_in(self);
+    }
+
+    fn report_electricity_consumption(&mut self, electricity: &Electricity)
+    where
+        Self: Sized,
+    {
+        electricity.report_consumption_to(self);
+    }
 }
 
 /// The [`Simulation`] runs across many different [`SimulationElement`]s.
@@ -226,32 +243,24 @@ impl Simulation {
     pub fn tick(
         delta: Duration,
         aircraft: &mut impl Aircraft,
+        electricity: &mut Electricity,
         simulator_reader_writer: &mut impl SimulatorReaderWriter,
     ) {
+        electricity.pre_tick(delta);
+
         let mut reader = SimulatorReader::new(simulator_reader_writer);
         let context = UpdateContext::from_reader(&mut reader, delta);
 
         let mut visitor = SimulatorToSimulationVisitor::new(&mut reader);
         aircraft.accept(&mut visitor);
 
-        aircraft.update_before_power_distribution(&context);
+        aircraft.update_before_power_distribution(&context, electricity);
 
-        // OLD
-        let mut electric_power = ElectricPower::from(aircraft.get_supplied_power(), delta);
-        electric_power.distribute_to(aircraft);
+        aircraft.distribute_electricity(&context, electricity);
 
         aircraft.update_after_power_distribution(&context);
-
-        electric_power.consume_in(aircraft);
-        electric_power.report_consumption_to(aircraft);
-        // END OLD
-
-        // NEW
-        aircraft.distribute_electricity(&context);
-        //aircraft.update_after_power_distribution(&context);
-        aircraft.consume_electricity();
-        aircraft.report_electricity_consumption();
-        //END NEW
+        aircraft.consume_electricity(electricity);
+        aircraft.report_electricity_consumption(electricity);
 
         let mut writer = SimulatorWriter::new(simulator_reader_writer);
         let mut visitor = SimulationToSimulatorVisitor::new(&mut writer);
